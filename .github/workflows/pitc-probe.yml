@@ -1,0 +1,49 @@
+name: Check FESCO bill server
+
+# Diagnostic only: checks whether the PITC/FESCO bill servers answer from GitHub's network,
+# which addresses they use, and which other bill hostnames exist. No reference numbers are used.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/pitc-probe.yml'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Probe
+        shell: bash
+        run: |
+          set +e
+          sudo apt-get install -y -qq dnsutils traceroute >/dev/null 2>&1
+          echo "== runner public IP: $(curl -s --max-time 10 https://api.ipify.org)"
+          for host in bill.pitc.com.pk pitc.com.pk www.pitc.com.pk fesco.com.pk www.fesco.com.pk fesco.gov.pk www.fesco.gov.pk pitc.gov.pk bill.pitc.gov.pk; do
+            for r in 8.8.8.8 1.1.1.1; do
+              echo "== dig $host @$r: A=[$(dig +short $host A @$r | tr '\n' ' ')] AAAA=[$(dig +short $host AAAA @$r | tr '\n' ' ')]"
+            done
+          done
+          echo "== certificate-log hostnames for pitc.com.pk / pitc.gov.pk / fesco"
+          for q in '%25.pitc.com.pk' '%25.pitc.gov.pk' '%25.fesco.com.pk' '%25.fesco.gov.pk'; do
+            curl -s --max-time 90 "https://crt.sh/?q=$q&output=json" | jq -r '.[].name_value' 2>/dev/null | tr 'A-Z' 'a-z' | sort -u | head -150
+          done
+          echo "== HTTP checks"
+          for url in https://bill.pitc.com.pk/fescobill http://bill.pitc.com.pk/fescobill https://bill.pitc.com.pk/ https://www.pitc.com.pk/ https://pitc.com.pk/ https://www.fesco.com.pk/ https://fesco.com.pk/ https://fesco.gov.pk/ https://www.fesco.gov.pk/ https://bill.pitc.gov.pk/fescobill; do
+            echo "-- $url"
+            curl -sS -o /tmp/out.html -w "code=%{http_code} ip=%{remote_ip} connect=%{time_connect}s tls=%{time_appconnect}s total=%{time_total}s size=%{size_download} redirect=%{redirect_url}\n" \
+              --max-time 30 -A "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36" "$url"
+            head -c 400 /tmp/out.html | tr '\n\r' '  '; echo
+          done
+          echo "== TCP checks on every address of bill.pitc.com.pk"
+          for ip in $(dig +short bill.pitc.com.pk A @8.8.8.8 | grep -E '^[0-9.]+$'); do
+            for p in 80 443; do
+              if timeout 12 bash -c "</dev/tcp/$ip/$p" 2>/dev/null; then echo "tcp $ip:$p OPEN"; else echo "tcp $ip:$p FAIL"; fi
+            done
+          done
+          echo "== route to bill.pitc.com.pk:443"
+          sudo traceroute -T -p 443 -w 2 -q 1 -m 25 bill.pitc.com.pk
+          echo "== bill links on FESCO website"
+          for site in https://www.fesco.com.pk/ https://fesco.gov.pk/; do
+            curl -sL --max-time 30 "$site" | grep -oiE 'href="[^"]*(bill|pitc)[^"]*"' | sort -u | head -40
+          done
