@@ -172,7 +172,36 @@ class BillFetcherTest {
         val (r, _) = run(fetcher(hedge = longArrayOf(0), maxAttempts = 4), ref)
         r as BillFetcher.Result.Failed
         assertTrue(r.reason, r.reason.contains("503") || r.reason.contains("server error"))
+        assertEquals(BillFetcher.Problem.SERVER, r.problem)
         assertEquals(4, requests.get())
+    }
+
+    @Test
+    fun unreachableServerIsReportedAsSuch() {
+        // Nothing listens on this port: every connection is refused, like the FESCO server today.
+        val dead = MockWebServer().apply { start() }
+        val url = dead.url("/fescobill").toString()
+        dead.shutdown()
+        val f = BillFetcher(formUrl = url, userAgent = "test", hedgeDelaysMs = longArrayOf(0), maxAttempts = 3,
+            retryDelayMs = 50, overallTimeoutMs = 20_000, baseClient = client)
+        val (r, _) = run(f, ref)
+        r as BillFetcher.Result.Failed
+        assertEquals(BillFetcher.Problem.UNREACHABLE, r.problem)
+    }
+
+    @Test
+    fun spreadsConnectionsOverRoutes() {
+        val used = java.util.Collections.synchronizedList(ArrayList<String>())
+        hangFirst = 2
+        val routes = listOf("Wi-Fi", "mobile data").map { name ->
+            BillFetcher.Route(name) { b -> b.addInterceptor { chain -> used += name; chain.proceed(chain.request()) } }
+        }
+        val f = BillFetcher(formUrl = server.url("/fescobill").toString(), userAgent = "test",
+            hedgeDelaysMs = longArrayOf(0, 200, 400), retryDelayMs = 50, baseClient = client, routes = { routes })
+        val (r, _) = run(f, ref)
+        r as BillFetcher.Result.Bill
+        assertTrue(used.toString(), used.contains("Wi-Fi") && used.contains("mobile data"))
+        assertTrue(r.route == "Wi-Fi")
     }
 
     @Test

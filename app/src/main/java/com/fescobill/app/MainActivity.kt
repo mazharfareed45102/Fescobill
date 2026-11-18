@@ -232,8 +232,12 @@ class MainActivity : AppCompatActivity() {
                 R.string.last_opened,
                 DateUtils.getRelativeTimeSpanString(e.lastOpened, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS)
             )
-            val saved = cache.get(e.digits)?.let {
-                if (it.month.isNotBlank()) getString(R.string.saved_on_phone, it.month) else getString(R.string.saved_on_phone_no_month)
+            val saved = if (Prefs.isWaiting(this, e.digits)) {
+                getString(R.string.waiting_for_fesco)
+            } else {
+                cache.get(e.digits)?.let {
+                    if (it.month.isNotBlank()) getString(R.string.saved_on_phone, it.month) else getString(R.string.saved_on_phone_no_month)
+                }
             }
             row.findViewById<TextView>(R.id.savedName).text = e.name.ifBlank { e.query.display }
             row.findViewById<TextView>(R.id.savedNumber).text =
@@ -286,6 +290,7 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton(R.string.delete) { _, _ ->
                 store.delete(e.digits)
                 cache.delete(e.digits)
+                BillRetryWorker.cancel(this, e.digits)
                 renderSaved()
             }
             .setNegativeButton(R.string.cancel, null)

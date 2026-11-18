@@ -4,6 +4,8 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -50,6 +52,7 @@ import androidx.core.view.isVisible
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
+import okhttp3.OkHttpClient
 import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -60,18 +63,20 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
 /**
  * Shows the official bill from bill.pitc.com.pk and saves or shares it as a PDF / picture.
  *
- * To be fast even when the FESCO site is slow:
- *  1. The saved copy of this bill (if it was opened before) is shown instantly.
- *  2. [BillFetcher] asks the site over several connections at once and retries failures.
- *  3. At the same time the WebView opens the site like a browser (and fills in the search form
- *     if the site asks for it). Whichever gets the bill first wins.
- * Once the live bill is on screen, its PDF and picture are made in the background and kept as the
- * new saved copy, so the PDF / Image / Share buttons work instantly.
+ *  1. If the bill was downloaded before, the complete saved copy is shown instantly (no internet
+ *     needed) while the app checks the website for a newer one.
+ *  2. Otherwise [BillFetcher] asks the site over several connections (Wi-Fi and mobile data) while
+ *     the WebView opens the site like a browser. Whichever gets the bill first wins.
+ *  3. If the FESCO server cannot be reached at all, [BillRetryWorker] keeps trying in the
+ *     background and a notification says when the bill is ready.
+ * Every bill shown is saved as a self-contained page plus PDF and picture, so the PDF / Image /
+ * Share buttons work instantly and the bill opens offline next time.
  */
 class BillActivity : AppCompatActivity() {
 
@@ -82,6 +87,7 @@ class BillActivity : AppCompatActivity() {
         private const val LOAD_POLL_MS = 1_500L
         private const val LOAD_POLL_LIMIT = 60
         private const val SLOW_AFTER_S = 12
+        private const val SMS_NUMBER = "8334"
         private val SUBMIT_POLLS_MS = longArrayOf(2_500, 5_000, 8_000, 12_000, 18_000)
 
         /** Trackers and ads are never needed to show a bill and only slow the page down. */
@@ -94,7 +100,13 @@ class BillActivity : AppCompatActivity() {
             Intent(context, BillActivity::class.java).putExtra(EXTRA_DIGITS, q.digits)
     }
 
-    private enum class Step { DIRECT, FORM, SUBMITTED, NATIVE, DONE }
+    /** What the main WebView is doing. */
+    private enum class Step { DIRECT, FORM, SUBMITTED, LOADING_NATIVE, LOADING_SAVED, SHOWING }
+
+    /** Which bill is on screen. */
+    private enum class Shown { NONE, SAVED, LIVE }
+
+    private enum class Check { RUNNING, SAME, NEWER, FAILED, NOT_FOUND }
 
     private enum class Tone(@ColorRes val color: Int) {
         INFO(R.color.banner_info_bg), OK(R.color.banner_ok_bg), WARN(R.color.banner_warn_bg), ERROR(R.color.banner_error_bg)
@@ -106,8 +118,9 @@ class BillActivity : AppCompatActivity() {
 
     private lateinit var query: BillQuery
     private lateinit var cache: BillCache
+    private lateinit var routes: NetworkRoutes
     private lateinit var webView: WebView
-    private lateinit var cachedView: WebView
+    private lateinit var previewView: WebView
     private lateinit var banner: TextView
     private lateinit var progress: ProgressBar
     private lateinit var errorPanel: View
@@ -118,23 +131,31 @@ class BillActivity : AppCompatActivity() {
 
     private val handler = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
-    private val fetcher by lazy { BillFetcher(userAgent = webView.settings.userAgentString) }
+    private val fetcher by lazy {
+        BillFetcher(userAgent = webView.settings.userAgentString, routes = routes::routes)
+    }
+    private val httpClient by lazy {
+        OkHttpClient.Builder().connectTimeout(12, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
+    }
 
     private var lookupGen = 0
+    private var lookupStartedWall = 0L
     private var cached: BillCache.Entry? = null
     private var fetchJob: BillFetcher.Job? = null
     private var step = Step.DIRECT
-    private var liveShown = false
-    private var liveMonth = ""
+    private var shown = Shown.NONE
+    private var shownMonth = ""
     private var liveBanner = ""
-    private var finalShown = false
-    private var nativeDone = false
-    private var nativeProblem = ""
+    private var check = Check.RUNNING
+    private var browserActive = false
+    private var nativeRunning = false
+    private var nativeProblem: BillFetcher.Problem? = null
     private var nativeNotFound: String? = null
     private var webDone = false
-    private var webProblem = ""
     private var webNotFound: String? = null
     private var webHint: String? = null
+    private var failureText: String? = null
+    private var notFoundText: String? = null
     private var autofillCount = 0
     private var navigatedSinceSubmit = false
     private var inspectToken = 0
@@ -144,12 +165,11 @@ class BillActivity : AppCompatActivity() {
     private var busy = false
     private var startedAt = 0L
     private var attempts = 0
-    private var bannerText = ""
-    private var bannerTone = Tone.INFO
     private var liveFiles: Files? = null
     private var filesWaiters: MutableList<(Files?) -> Unit>? = null
     private val afterLoad = ArrayList<Runnable>()
     private var pendingStorageAction: (() -> Unit)? = null
+    private var askedNotifications = false
     private val events = ArrayList<String>()
 
     private val detectJs by lazy { asset("pitc_detect.js") }
@@ -164,11 +184,14 @@ class BillActivity : AppCompatActivity() {
             if (granted) action?.invoke() else toast(R.string.storage_permission_needed)
         }
 
-    /** Updates the "waiting" banner every second while the bill is being fetched. */
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    /** Refreshes the banner every second while something is still being fetched. */
     private val ticker = object : Runnable {
         override fun run() {
-            if (!searching()) return
-            showSearchingBanner()
+            if (!fetching()) return
+            updateBanner()
             handler.postDelayed(this, 1_000)
         }
     }
@@ -182,6 +205,7 @@ class BillActivity : AppCompatActivity() {
         }
         query = parsed
         cache = BillCache(this)
+        routes = NetworkRoutes(this).also { it.start() }
 
         setContentView(R.layout.activity_bill)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
@@ -197,12 +221,21 @@ class BillActivity : AppCompatActivity() {
 
         findViewById<View>(R.id.retryButton).setOnClickListener { startLookup() }
         findViewById<View>(R.id.browserButton).setOnClickListener { openInBrowser() }
+        findViewById<View>(R.id.smsButton).setOnClickListener { smsBill() }
         pdfButton.setOnClickListener { downloadPdf() }
         imageButton.setOnClickListener { saveImage() }
         shareButton.setOnClickListener { shareBill() }
 
-        setupCachedView()
+        setupPreviewView()
         setupWebView()
+        Prefs.saveUserAgent(this, webView.settings.userAgentString)
+
+        // If the background download finishes while this screen is open, show the bill at once.
+        BillRetryWorker.liveData(this, query.digits).observe(this) {
+            val entry = cache.get(query.digits)
+            if (shown == Shown.NONE && entry?.page != null && entry.pageAt >= lookupStartedWall) startLookup()
+        }
+
         startLookup()
     }
 
@@ -211,7 +244,8 @@ class BillActivity : AppCompatActivity() {
         fetchJob?.cancel()
         handler.removeCallbacksAndMessages(null)
         worker.shutdown()
-        for (view in listOf(if (::webView.isInitialized) webView else null, if (::cachedView.isInitialized) cachedView else null)) {
+        if (::routes.isInitialized) routes.stop()
+        for (view in listOf(if (::webView.isInitialized) webView else null, if (::previewView.isInitialized) previewView else null)) {
             view ?: continue
             (view.parent as? ViewGroup)?.removeView(view)
             view.destroy()
@@ -224,35 +258,25 @@ class BillActivity : AppCompatActivity() {
         return true
     }
 
-    override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
-        android.R.id.home -> {
-            finish()
-            true
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        when (item.itemId) {
+            android.R.id.home -> finish()
+            R.id.action_refresh -> startLookup()
+            R.id.action_print -> printBill()
+            R.id.action_browser -> openInBrowser()
+            R.id.action_sms -> smsBill()
+            R.id.action_details -> showDetails()
+            else -> return super.onOptionsItemSelected(item)
         }
-        R.id.action_refresh -> {
-            startLookup()
-            true
-        }
-        R.id.action_print -> {
-            printBill()
-            true
-        }
-        R.id.action_browser -> {
-            openInBrowser()
-            true
-        }
-        R.id.action_details -> {
-            showDetails()
-            true
-        }
-        else -> super.onOptionsItemSelected(item)
+        return true
     }
 
     // ---- Setup ------------------------------------------------------------------------------
 
-    private fun setupCachedView() {
-        cachedView = findViewById(R.id.cachedView)
-        with(cachedView.settings) {
+    /** Shows the picture of an older saved bill (from app version 1.0.3) while the page loads. */
+    private fun setupPreviewView() {
+        previewView = findViewById(R.id.cachedView)
+        with(previewView.settings) {
             javaScriptEnabled = false
             allowFileAccess = true // only to show our own saved picture of the bill
             useWideViewPort = true
@@ -261,7 +285,7 @@ class BillActivity : AppCompatActivity() {
             displayZoomControls = false
             setSupportZoom(true)
         }
-        cachedView.webViewClient = WebViewClient()
+        previewView.webViewClient = WebViewClient()
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -276,7 +300,7 @@ class BillActivity : AppCompatActivity() {
             displayZoomControls = false
             setSupportZoom(true)
             textZoom = 100                  // a large phone font size must not break the bill layout
-            cacheMode = WebSettings.LOAD_DEFAULT // the site's styles and images are reused next time
+            cacheMode = WebSettings.LOAD_DEFAULT
             javaScriptCanOpenWindowsAutomatically = false
         }
         CookieManager.getInstance().setAcceptCookie(true)
@@ -303,7 +327,7 @@ class BillActivity : AppCompatActivity() {
             }
 
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
-                event("browser: loading ${shortUrl(url)}")
+                if (step != Step.LOADING_SAVED) event("browser: loading ${shortUrl(url)}")
                 inspectToken++ // cancels checks scheduled for the previous page
                 pageLoaded = false
                 if (step == Step.SUBMITTED) navigatedSinceSubmit = true
@@ -311,22 +335,21 @@ class BillActivity : AppCompatActivity() {
             }
 
             override fun onPageFinished(view: WebView, url: String?) {
-                event("browser: page finished ${shortUrl(url)}")
                 view.evaluateJavascript(hooksJs, null)
                 pageLoaded = true
                 runAfterLoad()
-                scheduleInspect(700)
+                scheduleInspect(500)
             }
 
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (request.isForMainFrame && Build.VERSION.SDK_INT >= 23) {
-                    onWebFailure(getString(R.string.error_network, error.description))
+                    onWebFailure("${error.description}")
                 }
             }
 
             @Deprecated("Needed for Android 5")
             override fun onReceivedError(view: WebView, errorCode: Int, description: String?, failingUrl: String?) {
-                if (Build.VERSION.SDK_INT < 23) onWebFailure(getString(R.string.error_network, description.orEmpty()))
+                if (Build.VERSION.SDK_INT < 23) onWebFailure(description.orEmpty())
             }
 
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
@@ -369,38 +392,60 @@ class BillActivity : AppCompatActivity() {
         handler.removeCallbacksAndMessages(null)
         afterLoad.clear()
         inspectToken++
-        step = Step.DIRECT
-        liveShown = false
-        liveMonth = ""
+        shown = Shown.NONE
+        shownMonth = ""
         liveBanner = ""
-        finalShown = false
-        nativeDone = false
-        nativeProblem = ""
+        check = Check.RUNNING
+        browserActive = false
+        nativeRunning = false
+        nativeProblem = null
         nativeNotFound = null
         webDone = false
-        webProblem = ""
         webNotFound = null
         webHint = null
+        failureText = null
+        notFoundText = null
         autofillCount = 0
         navigatedSinceSubmit = false
         pageLoaded = false
         lastHttpStatus = 0
-        fitted = false
         busy = false
         attempts = 0
         liveFiles = null
         filesWaiters = null
         errorPanel.isVisible = false
+        previewView.isVisible = false
         events.clear()
         startedAt = SystemClock.elapsedRealtime()
+        lookupStartedWall = System.currentTimeMillis()
 
-        cached = cache.get(query.digits)
-        event("open ${Pitc.billUrl(query)}" + (cached?.let { " (saved copy: ${it.month.ifBlank { "yes" }})" } ?: ""))
-        showCached()
+        val c = cache.get(query.digits)
+        cached = c
+        event("open ${Pitc.billUrl(query)}" + (c?.let { " (saved copy: ${it.month.ifBlank { "yes" }})" } ?: ""))
+        val savedHtml = c?.page?.let { runCatching { it.readText() }.getOrNull() }
+        if (c != null && savedHtml != null) {
+            // Instant: the complete bill downloaded earlier.
+            step = Step.LOADING_SAVED
+            fitted = false
+            webView.loadDataWithBaseURL(c.baseUrl.ifBlank { Pitc.billUrl(query) }, savedHtml, "text/html", "UTF-8", null)
+        } else {
+            showPreview()
+            startBrowser()
+        }
+        startNative(gen)
         updateButtons()
         ticker.run()
+    }
 
-        // Fast path: several direct connections at once.
+    private fun startBrowser() {
+        browserActive = true
+        step = Step.DIRECT
+        fitted = false
+        webView.loadUrl(Pitc.billUrl(query))
+    }
+
+    private fun startNative(gen: Int) {
+        nativeRunning = true
         fetchJob = fetcher.fetch(
             query,
             deliver = { handler.post(it) },
@@ -408,125 +453,140 @@ class BillActivity : AppCompatActivity() {
             onDone = { if (gen == lookupGen) onNativeResult(it) },
             onLog = { if (gen == lookupGen) event(it) },
         )
-        // Browser path at the same time.
-        webView.loadUrl(Pitc.billUrl(query))
     }
 
-    private fun searching() = !liveShown && !finalShown
+    private fun fetching() = nativeRunning || (browserActive && !webDone && shown == Shown.NONE)
 
-    private fun showCached() {
+    private fun showPreview() {
         val c = cached
         val png = c?.png
-        if (c == null || png == null) {
-            cachedView.isVisible = false
-            return
-        }
+        if (c == null || png == null) return
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(png.path, bounds)
         val w = if (bounds.outWidth > 0) bounds.outWidth else 1654
         val html = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=$w, user-scalable=yes\"></head>" +
-            "<body style=\"margin:0;background:#ffffff\"><img src=\"${png.name}\" " +
-            "style=\"width:${w}px;display:block\"></body></html>"
-        cachedView.clearCache(false) // the picture file may have been replaced since it was last shown
-        cachedView.loadDataWithBaseURL(Uri.fromFile(png.parentFile).toString() + "/", html, "text/html", "UTF-8", null)
-        cachedView.isVisible = true
+            "<body style=\"margin:0;background:#ffffff\"><img src=\"${png.name}\" style=\"width:${w}px;display:block\"></body></html>"
+        previewView.clearCache(false) // the picture file may have been replaced since it was last shown
+        previewView.loadDataWithBaseURL(Uri.fromFile(png.parentFile).toString() + "/", html, "text/html", "UTF-8", null)
+        previewView.isVisible = true
     }
 
-    private fun cachedLabel(c: BillCache.Entry): String {
-        val ago = DateUtils.getRelativeTimeSpanString(c.savedAt, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS)
-        return if (c.month.isNotBlank()) getString(R.string.cached_label, c.month, ago) else getString(R.string.cached_label_no_month, ago)
-    }
-
-    private fun showSearchingBanner() {
-        if (busy) return
-        val secs = ((SystemClock.elapsedRealtime() - startedAt) / 1000).toInt()
+    private fun savedLabel(): String {
         val c = cached
-        val first = if (c != null) getString(R.string.status_cached_checking, cachedLabel(c)) else getString(R.string.status_contacting)
-        val lines = arrayListOf(first + "   " + getString(R.string.status_seconds, secs))
-        if (secs >= SLOW_AFTER_S) lines += getString(R.string.status_slow, max(attempts, 1) + 1)
-        webHint?.let { lines += it }
-        setBanner(lines.joinToString("\n"), if (secs >= SLOW_AFTER_S && c == null) Tone.WARN else Tone.INFO)
+        val month = shownMonth.ifBlank { c?.month.orEmpty() }
+        val at = c?.pageAt?.takeIf { it > 0 } ?: c?.savedAt ?: System.currentTimeMillis()
+        val ago = DateUtils.getRelativeTimeSpanString(at, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS)
+        return if (month.isNotBlank()) getString(R.string.saved_label, month, ago) else getString(R.string.saved_label_no_month, ago)
     }
 
     private fun onNativeResult(result: BillFetcher.Result) {
         fetchJob = null
-        if (isFinishing || liveShown) return
+        nativeRunning = false
+        if (isFinishing) return
         when (result) {
             is BillFetcher.Result.Bill -> {
-                step = Step.NATIVE
-                inspectToken++
-                val cookies = CookieManager.getInstance()
-                for (c in result.cookies) cookies.setCookie(result.url, c.toString())
-                webView.stopLoading()
-                webView.loadDataWithBaseURL(result.url, result.html, "text/html", "UTF-8", result.url)
+                val month = PitcHtml.billMonth(result.html).orEmpty()
+                event("bill received over ${result.route}" + if (month.isNotBlank()) " ($month)" else "")
+                saveSnapshot(result.html, result.url, result.resources, month)
+                when {
+                    shown == Shown.LIVE -> Unit
+                    shown == Shown.SAVED && month.isNotBlank() && month == shownMonth -> check = Check.SAME
+                    else -> {
+                        check = Check.NEWER
+                        step = Step.LOADING_NATIVE
+                        inspectToken++
+                        fitted = false
+                        val cookies = CookieManager.getInstance()
+                        for (c in result.cookies) cookies.setCookie(result.url, c.toString())
+                        webView.stopLoading()
+                        webView.loadDataWithBaseURL(result.url, result.html, "text/html", "UTF-8", result.url)
+                    }
+                }
             }
             is BillFetcher.Result.NotFound -> {
-                nativeDone = true
+                check = Check.NOT_FOUND
                 nativeNotFound = result.message
-                showNotFound(result.message) // the browser path keeps going and still wins if it finds a bill
+                if (shown == Shown.NONE) showNotFound(result.message) // the browser may still find it
             }
             is BillFetcher.Result.Failed -> {
-                nativeDone = true
-                nativeProblem = result.reason
-                if (webDone) concludeFailure()
+                check = Check.FAILED
+                nativeProblem = result.problem
+                if (shown == Shown.NONE && (!browserActive || webDone)) concludeFailure()
             }
         }
+        updateBanner()
     }
 
     private fun onWebFailure(message: String) {
         event("browser error: $message")
-        if (liveShown || step == Step.NATIVE || webDone) return
+        if (!browserActive || shown != Shown.NONE || webDone) return
+        if (step != Step.DIRECT && step != Step.FORM && step != Step.SUBMITTED) return
         webDone = true
-        webProblem = message
-        if (nativeDone) {
+        if (!nativeRunning) {
             concludeFailure()
         } else {
             // Hide the browser's error page while the other connections are still trying.
             webView.loadUrl("about:blank")
         }
+        updateBanner()
     }
 
     private fun webGaveUp(problem: String) {
         event("browser gave up: $problem")
         webDone = true
-        webProblem = problem
-        if (nativeDone) concludeFailure()
+        if (!nativeRunning) concludeFailure()
+        updateBanner()
     }
 
-    /** Neither path produced a bill. */
+    /** Neither path produced a bill and none is saved. */
     private fun concludeFailure() {
-        if (liveShown || finalShown) return
+        if (shown != Shown.NONE || failureText != null) return
         val notFound = webNotFound ?: nativeNotFound
         if (notFound != null) {
             showNotFound(notFound)
             return
         }
-        finalShown = true
         handler.removeCallbacks(ticker)
-        val c = cached
-        if (c != null) {
-            setBanner(getString(R.string.status_cached_offline, cachedLabel(c)), Tone.WARN)
-        } else {
-            showError(webProblem.ifBlank { getString(R.string.status_failed, nativeProblem) })
+        val why = when (nativeProblem) {
+            BillFetcher.Problem.UNREACHABLE, null -> R.string.fail_unreachable
+            BillFetcher.Problem.NO_INTERNET -> R.string.fail_no_internet
+            BillFetcher.Problem.SECURE -> R.string.error_ssl
+            BillFetcher.Problem.SERVER -> R.string.fail_server
+            BillFetcher.Problem.UNEXPECTED -> R.string.fail_unexpected
         }
+        val canWait = nativeProblem != BillFetcher.Problem.NO_INTERNET
+        if (canWait) {
+            // Keep trying in the background and tell the user when the bill is downloaded.
+            BillRetryWorker.schedule(this, query)
+            SavedBills(this).markOpened(query)
+            askForNotifications()
+            event("background retry scheduled (every 15 min)")
+        }
+        val text = getString(why) + if (canWait) "\n\n" + getString(R.string.fail_background) else ""
+        failureText = text
+        if (!previewView.isVisible) {
+            errorText.text = text
+            errorPanel.isVisible = true
+        }
+        updateBanner()
         updateButtons()
     }
 
     private fun showNotFound(siteMessage: String) {
-        if (liveShown) return
-        finalShown = true
-        handler.removeCallbacks(ticker)
-        if (cached == null) cachedView.isVisible = false
+        if (shown != Shown.NONE) return
         var text = getString(R.string.status_not_found, query.display)
         if (siteMessage.isNotBlank()) text += "\n" + getString(R.string.status_not_found_msg, siteMessage)
-        setBanner(text, Tone.WARN)
+        notFoundText = text
+        updateBanner()
         updateButtons()
     }
 
-    private fun showError(message: String) {
-        errorText.text = message
-        errorPanel.isVisible = true
-        setBanner(getString(R.string.error_title), Tone.ERROR)
+    private fun askForNotifications() {
+        if (askedNotifications || Build.VERSION.SDK_INT < 33) return
+        askedNotifications = true
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     private fun startLoadPolls() {
@@ -567,40 +627,46 @@ class BillActivity : AppCompatActivity() {
 
     private fun onPageState(s: PageState, fromPoll: Boolean, lastPoll: Boolean) {
         if (isFinishing) return
-        if (!fromPoll || s.bill && !liveShown) {
-            event("browser page: bill=${s.bill} form=${s.form}" + (if (s.message.isNotBlank()) " message=\"${s.message}\"" else ""))
-        }
         if (s.bill) {
-            onBillShown(s)
+            onBillOnScreen(s)
             return
         }
         if (fromPoll) {
             // The form was filled but the page has not moved on (e.g. the site wants a manual tap).
-            if (lastPoll && step == Step.SUBMITTED && !navigatedSinceSubmit && !webDone) {
+            if (lastPoll && browserActive && step == Step.SUBMITTED && !navigatedSinceSubmit && !webDone) {
                 if (s.form && s.message.isNotBlank()) {
                     webNotFound = s.message
                     webDone = true
                     showNotFound(s.message)
                 } else {
                     webHint = getString(R.string.status_tap_search)
-                    cachedView.isVisible = false
-                    if (searching()) showSearchingBanner()
+                    previewView.isVisible = false
+                    updateBanner()
                 }
             }
             return
         }
-        if (webDone) return
+        if (step == Step.SHOWING || step == Step.LOADING_NATIVE) return
+        event("browser page: bill=false form=${s.form}" + if (s.message.isNotBlank()) " message=\"${s.message}\"" else "")
         when (step) {
-            Step.DIRECT -> if (s.form) {
-                autofill()
-            } else {
-                step = Step.FORM
-                lastHttpStatus = 0
-                webView.loadUrl(Pitc.FORM_URL)
+            Step.LOADING_SAVED -> {
+                // The saved copy could not be shown; use the website instead.
+                event("saved copy not usable")
+                startBrowser()
             }
-            Step.FORM -> if (s.form) autofill() else webGaveUp(unexpectedText())
-            Step.SUBMITTED -> {
-                if (!navigatedSinceSubmit) return // a repeated "finished" event for the page we just filled
+            Step.DIRECT -> if (!webDone) {
+                if (s.form) {
+                    autofill()
+                } else {
+                    step = Step.FORM
+                    lastHttpStatus = 0
+                    webView.loadUrl(Pitc.FORM_URL)
+                }
+            }
+            Step.FORM -> if (!webDone) {
+                if (s.form) autofill() else webGaveUp(unexpectedText())
+            }
+            Step.SUBMITTED -> if (!webDone && navigatedSinceSubmit) {
                 when {
                     s.form && s.message.isNotBlank() -> {
                         webNotFound = s.message
@@ -611,7 +677,7 @@ class BillActivity : AppCompatActivity() {
                     else -> webGaveUp(unexpectedText())
                 }
             }
-            Step.NATIVE, Step.DONE -> Unit
+            Step.LOADING_NATIVE, Step.SHOWING -> Unit
         }
     }
 
@@ -630,35 +696,53 @@ class BillActivity : AppCompatActivity() {
         }
     }
 
-    private fun onBillShown(s: PageState) {
-        val firstTime = !liveShown
-        val viaDirect = step == Step.NATIVE
-        step = Step.DONE
-        liveShown = true
-        finalShown = false
+    private fun onBillOnScreen(s: PageState) {
+        if (step == Step.SHOWING) {
+            updateBanner()
+            return
+        }
+        val fromSaved = step == Step.LOADING_SAVED
+        val viaBrowser = step == Step.DIRECT || step == Step.FORM || step == Step.SUBMITTED
+        step = Step.SHOWING
+        shown = if (fromSaved) Shown.SAVED else Shown.LIVE
+        if (s.month.isNotBlank()) shownMonth = s.month else if (fromSaved) shownMonth = cached?.month.orEmpty()
+        failureText = null
+        notFoundText = null
         webHint = null
-        if (s.month.isNotBlank()) liveMonth = s.month
-        fetchJob?.cancel()
-        fetchJob = null
-        handler.removeCallbacks(ticker)
         errorPanel.isVisible = false
-        cachedView.isVisible = false
-        updateButtons()
-        if (firstTime) {
-            event("bill shown" + (if (liveMonth.isNotBlank()) " ($liveMonth)" else "") + if (viaDirect) " via direct connection" else " via browser")
+        previewView.isVisible = false
+        event("bill shown" + (if (shownMonth.isNotBlank()) " ($shownMonth)" else "") +
+            when {
+                fromSaved -> " from the saved copy"
+                viaBrowser -> " via browser"
+                else -> " via direct connection"
+            })
+
+        if (shown == Shown.LIVE) {
             val old = cached
-            val suffix = if (liveMonth.isNotBlank()) "($liveMonth)" else ""
-            liveBanner = if (old != null && old.month.isNotBlank() && liveMonth.isNotBlank() && old.month != liveMonth) {
+            val suffix = if (shownMonth.isNotBlank()) "($shownMonth)" else ""
+            liveBanner = if (old != null && old.month.isNotBlank() && shownMonth.isNotBlank() && old.month != shownMonth) {
                 getString(R.string.status_new_bill, suffix)
             } else {
                 getString(R.string.status_live_ok, suffix)
             }
+            fetchJob?.cancel()
+            fetchJob = null
+            nativeRunning = false
+            BillRetryWorker.cancel(this, query.digits)
             SavedBills(this).markOpened(query)
-            fitToWidth()
-            // Make the PDF and picture now, so the buttons work instantly and the copy is saved for next time.
-            requestFiles(null)
+            liveFiles = null
+            requestFiles(null) // make the PDF and picture now, so the buttons work instantly
+            if (viaBrowser) saveSnapshotFromBrowser()
+        } else {
+            val c = cached
+            val pdf = c?.pdf
+            liveFiles = if (c != null && pdf != null && c.filesCurrent) Files(pdf, c.png, c.month) else null
+            if (liveFiles == null) requestFiles(null)
         }
-        if (!busy) setBanner(liveBanner, Tone.OK)
+        fitToWidth()
+        updateButtons()
+        updateBanner()
     }
 
     private fun fitToWidth() {
@@ -670,28 +754,69 @@ class BillActivity : AppCompatActivity() {
         }
     }
 
-    private fun whenPageLoaded(action: () -> Unit) {
-        val r = Runnable(action)
-        if (pageLoaded) {
-            handler.postDelayed(r, 400)
-            return
+    // ---- Saving the complete page for next time ----------------------------------------------
+
+    private fun saveSnapshot(html: String, url: String, resources: PageSnapshot.Fetcher, month: String) {
+        val gen = lookupGen
+        worker.execute {
+            val entry = runCatching {
+                val page = PageSnapshot.build(html, url, resources)
+                cache.putPage(query.digits, page, url, month)
+            }.getOrNull()
+            runOnUiThread {
+                if (gen == lookupGen && entry != null && !isDestroyed) {
+                    cached = entry
+                    event("complete copy saved on phone")
+                }
+            }
         }
-        afterLoad += r
-        // Don't wait forever for a slow picture or script on the page.
-        handler.postDelayed({ if (afterLoad.remove(r)) r.run() }, 15_000)
     }
 
-    private fun runAfterLoad() {
-        val list = ArrayList(afterLoad)
-        afterLoad.clear()
-        for (r in list) handler.postDelayed(r, 400)
+    /** The browser path found the bill: download the page again (unchanged by its scripts) and save it. */
+    private fun saveSnapshotFromBrowser() {
+        val url = webView.url ?: return
+        if (!url.startsWith("http")) return
+        val month = shownMonth
+        val cookieManager = CookieManager.getInstance()
+        val resources = HttpResourceFetcher(httpClient, webView.settings.userAgentString) { cookieManager.getCookie(it) }
+        val gen = lookupGen
+        worker.execute {
+            val raw = resources.fetch(url)?.bytes?.let { String(it, Charsets.UTF_8) }
+            val entry = if (raw != null && PitcHtml.isBill(raw, url)) {
+                runCatching { cache.putPage(query.digits, PageSnapshot.build(raw, url, resources), url, month) }.getOrNull()
+            } else {
+                null
+            }
+            runOnUiThread {
+                if (gen == lookupGen && entry != null && !isDestroyed) {
+                    cached = entry
+                    event("complete copy saved on phone")
+                }
+            }
+        }
     }
 
     // ---- Banner and buttons ------------------------------------------------------------------
 
-    private fun setBanner(text: String, tone: Tone) {
-        bannerText = text
-        bannerTone = tone
+    private fun updateBanner() {
+        if (busy) return
+        val secs = ((SystemClock.elapsedRealtime() - startedAt) / 1000).toInt()
+        val (text, tone) = when {
+            shown == Shown.LIVE -> liveBanner to Tone.OK
+            shown == Shown.SAVED -> when (check) {
+                Check.RUNNING -> getString(R.string.status_saved_checking, savedLabel(), secs) to Tone.INFO
+                Check.SAME -> getString(R.string.status_saved_latest, savedLabel()) to Tone.OK
+                else -> getString(R.string.status_saved_offline, savedLabel()) to Tone.OK
+            }
+            notFoundText != null -> notFoundText!! to Tone.WARN
+            failureText != null -> (if (previewView.isVisible) failureText!! else getString(R.string.error_title)) to Tone.ERROR
+            else -> {
+                val lines = arrayListOf(getString(R.string.status_contacting) + "   " + getString(R.string.status_seconds, secs))
+                if (secs >= SLOW_AFTER_S) lines += getString(R.string.status_slow, max(attempts, 1) + if (browserActive) 1 else 0)
+                webHint?.let { lines += it }
+                lines.joinToString("\n") to (if (secs >= SLOW_AFTER_S) Tone.WARN else Tone.INFO)
+            }
+        }
         showBanner(text, tone)
     }
 
@@ -701,8 +826,10 @@ class BillActivity : AppCompatActivity() {
         banner.isVisible = true
     }
 
+    private fun hasBill() = shown != Shown.NONE || cached?.pdf != null
+
     private fun updateButtons() {
-        val enabled = (liveShown || cached != null) && !busy
+        val enabled = hasBill() && !busy
         pdfButton.isEnabled = enabled
         imageButton.isEnabled = enabled
         shareButton.isEnabled = enabled
@@ -711,11 +838,7 @@ class BillActivity : AppCompatActivity() {
     private fun setBusy(isBusy: Boolean, @StringRes message: Int = 0) {
         busy = isBusy
         updateButtons()
-        when {
-            isBusy && message != 0 -> showBanner(getString(message), Tone.INFO)
-            !isBusy && searching() -> showSearchingBanner()
-            !isBusy -> showBanner(bannerText, bannerTone)
-        }
+        if (isBusy && message != 0) showBanner(getString(message), Tone.INFO) else if (!isBusy) updateBanner()
     }
 
     // ---- PDF, picture, share ----------------------------------------------------------------
@@ -728,22 +851,28 @@ class BillActivity : AppCompatActivity() {
         .build()
 
     private fun displayName(files: Files?, ext: String): String {
-        val month = (files?.month ?: liveMonth).replace(" ", "")
+        val month = (files?.month ?: shownMonth).replace(" ", "")
         val tag = month.ifBlank { SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) }
         return "FESCO-Bill-${query.digits}-$tag.$ext"
     }
 
+    private fun savedFiles(): Files? {
+        val c = cached ?: return null
+        val pdf = c.pdf ?: return null
+        return Files(pdf, c.png, c.month)
+    }
+
     /**
-     * The bill's PDF and picture: the live bill's (made once, in the background) or the saved copy's.
-     * [cb] gets null if they could not be made.
+     * The PDF and picture of the bill on screen (made once, in the background), or of the saved
+     * copy when no bill is on screen. [cb] gets null if they could not be made.
      */
     private fun requestFiles(cb: ((Files?) -> Unit)?) {
         liveFiles?.let { files ->
             cb?.invoke(files)
             return
         }
-        if (!liveShown) {
-            cb?.invoke(cached?.let { Files(it.pdf, it.png, it.month) })
+        if (shown == Shown.NONE) {
+            cb?.invoke(savedFiles())
             return
         }
         filesWaiters?.let { waiting ->
@@ -764,15 +893,18 @@ class BillActivity : AppCompatActivity() {
                     return@makePdf
                 }
                 event("PDF ready")
-                val month = liveMonth
+                val month = shownMonth
                 worker.execute {
                     val png = File(pdf.parentFile, "work.png")
                     val pngOk = runCatching { BillFiles.pdfToPng(pdf, png) }.isSuccess
-                    val entry = runCatching { cache.put(query.digits, pdf, png.takeIf { pngOk }, month) }.getOrNull()
+                    val entry = runCatching { cache.putFiles(query.digits, pdf, png.takeIf { pngOk }, month) }.getOrNull()
                     runOnUiThread {
                         if (gen != lookupGen || isDestroyed) return@runOnUiThread
                         if (entry != null) cached = entry
-                        finishFiles(entry?.let { Files(it.pdf, it.png, it.month) } ?: Files(pdf, png.takeIf { pngOk }, month))
+                        val savedPdf = entry?.pdf
+                        finishFiles(
+                            if (savedPdf != null) Files(savedPdf, entry.png, entry.month) else Files(pdf, png.takeIf { pngOk }, month)
+                        )
                     }
                 }
             }
@@ -786,7 +918,24 @@ class BillActivity : AppCompatActivity() {
         waiters.forEach { it(files) }
     }
 
-    /** Prints the live page (as the site's own Print button would) straight into a PDF file. */
+    private fun whenPageLoaded(action: () -> Unit) {
+        val r = Runnable(action)
+        if (pageLoaded) {
+            handler.postDelayed(r, 400)
+            return
+        }
+        afterLoad += r
+        // Don't wait forever for a slow picture or script on the page.
+        handler.postDelayed({ if (afterLoad.remove(r)) r.run() }, 15_000)
+    }
+
+    private fun runAfterLoad() {
+        val list = ArrayList(afterLoad)
+        afterLoad.clear()
+        for (r in list) handler.postDelayed(r, 400)
+    }
+
+    /** Prints the page on screen (as the site's own Print button would) straight into a PDF file. */
     private fun makePdf(onDone: (File?) -> Unit) {
         val out = File(File(cacheDir, "bills").apply { mkdirs() }, "work.pdf")
         var finished = false
@@ -816,12 +965,12 @@ class BillActivity : AppCompatActivity() {
 
     /** Runs [action] with the bill files, showing "Preparing…" if they are still being made. */
     private fun withFiles(@StringRes preparing: Int, action: (Files?) -> Unit) {
-        if (!liveShown && cached == null) {
+        if (!hasBill()) {
             toast(R.string.wait_for_bill)
             return
         }
         if (busy) return
-        val ready = liveFiles ?: if (!liveShown) cached?.let { Files(it.pdf, it.png, it.month) } else null
+        val ready = liveFiles ?: if (shown == Shown.NONE) savedFiles() else null
         if (ready != null) {
             action(ready)
             return
@@ -851,7 +1000,7 @@ class BillActivity : AppCompatActivity() {
     }
 
     private fun shareBill() {
-        if (!liveShown && cached == null) return
+        if (!hasBill()) return
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.share_as)
             .setItems(arrayOf(getString(R.string.share_pdf), getString(R.string.share_image))) { _, which ->
@@ -874,7 +1023,7 @@ class BillActivity : AppCompatActivity() {
 
     /** Last resort: a picture of what is on screen now. */
     private fun captureScreen(): File? = try {
-        val view = if (cachedView.isVisible) cachedView else webView
+        val view = if (previewView.isVisible) previewView else webView
         val bmp = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
         view.draw(Canvas(bmp))
         val f = File(File(cacheDir, "bills").apply { mkdirs() }, "screen.png")
@@ -920,13 +1069,10 @@ class BillActivity : AppCompatActivity() {
     }
 
     private fun printBill() {
+        val pdf = cached?.pdf
         when {
-            liveShown -> printWithSystemDialog()
-            cached != null -> {
-                // Open the saved PDF; the PDF viewer can print it.
-                val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", cached!!.pdf)
-                BillFiles.open(this, uri, "application/pdf")
-            }
+            shown != Shown.NONE -> printWithSystemDialog()
+            pdf != null -> BillFiles.open(this, FileProvider.getUriForFile(this, "$packageName.fileprovider", pdf), "application/pdf")
             else -> toast(R.string.wait_for_bill)
         }
     }
@@ -935,14 +1081,26 @@ class BillActivity : AppCompatActivity() {
     private fun printWithSystemDialog() {
         val printManager = getSystemService(Context.PRINT_SERVICE) as? PrintManager ?: return
         toast(R.string.pdf_fallback)
+        val name = displayName(null, "pdf").removeSuffix(".pdf")
         try {
-            printManager.print(
-                displayName(null, "pdf").removeSuffix(".pdf"),
-                webView.createPrintDocumentAdapter(displayName(null, "pdf").removeSuffix(".pdf")),
-                PrintAttributes.Builder().setMediaSize(PrintAttributes.MediaSize.ISO_A4).build(),
-            )
+            printManager.print(name, webView.createPrintDocumentAdapter(name),
+                PrintAttributes.Builder().setMediaSize(PrintAttributes.MediaSize.ISO_A4).build())
         } catch (t: Throwable) {
             toast(getString(R.string.save_failed, t.message ?: t.javaClass.simpleName))
+        }
+    }
+
+    /** PITC's SMS service: "PITC <reference number>" to 8334 answers with the amount and due date. */
+    private fun smsBill() {
+        if (query.mode != SearchMode.REFERENCE) {
+            toast(R.string.sms_needs_reference)
+            return
+        }
+        val sms = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$SMS_NUMBER")).putExtra("sms_body", "PITC ${query.digits}")
+        try {
+            startActivity(sms)
+        } catch (e: ActivityNotFoundException) {
+            toast(R.string.no_sms_app)
         }
     }
 
@@ -993,6 +1151,8 @@ class BillActivity : AppCompatActivity() {
         }
     }
 
+    // ---- Connection details -----------------------------------------------------------------
+
     private fun event(message: String) {
         val secs = (SystemClock.elapsedRealtime() - startedAt) / 100 / 10.0
         events += String.format(Locale.US, "%6.1fs  %s", secs, message)
@@ -1012,8 +1172,8 @@ class BillActivity : AppCompatActivity() {
             .setTitle(R.string.details_title)
             .setMessage(text)
             .setPositiveButton(R.string.copy) { _, _ ->
-                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                cm.setPrimaryClip(android.content.ClipData.newPlainText("FESCO Bill details", text))
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("FESCO Bill details", text))
                 toast(R.string.copied)
             }
             .setNegativeButton(R.string.ok, null)
@@ -1030,7 +1190,7 @@ class BillActivity : AppCompatActivity() {
     private inner class PageBridge {
         @JavascriptInterface
         fun print() {
-            runOnUiThread { if (liveShown) downloadPdf() }
+            runOnUiThread { if (shown != Shown.NONE) downloadPdf() }
         }
     }
 }

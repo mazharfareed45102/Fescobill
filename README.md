@@ -11,8 +11,11 @@ A simple, ad-free Android app to view, download and share your **FESCO electrici
 - **Saved bills**: every bill you open is remembered. Tap it next time, or press and hold to give it a name ("Home", "Abu ji", …).
 - **Opens instantly the second time**: the last bill for each number is kept on the phone (PDF + picture).
   It shows at once, even without internet, while the app checks FESCO for a newer bill in the background.
-- **Fast even when the FESCO site is slow**: the app asks the site over several connections at once,
-  retries failed requests by itself and uses whichever answer arrives first.
+- **Fast even when the FESCO site is slow**: the app asks the site over several connections at once
+  (over Wi-Fi and mobile data), retries failed requests by itself and uses whichever answer arrives first.
+- **When the FESCO server is down**: the app says so plainly, keeps trying every 15 minutes in the
+  background (also when closed) and sends a notification as soon as the bill is downloaded.
+  The bill amount can meanwhile be requested by SMS (PITC SMS service, 8334).
 
 Works on Android 5.0 and newer.
 
@@ -46,6 +49,19 @@ When you open a bill, the app does three things at once:
 
 The first bill to arrive is shown, exactly as the website renders it. If the website says the number is
 wrong, its own message is shown.
+
+Every bill shown is saved as a self-contained page (`PageSnapshot`: styles, scripts and pictures are put
+inside the HTML) plus a PDF and a picture. Next time it opens instantly, also without internet, and the app
+checks the website for a newer bill in the background.
+
+If the FESCO server cannot be reached, `BillRetryWorker` (WorkManager) tries again every 15 minutes for up
+to 3 days and posts a notification when the bill has been downloaded.
+
+**There is no other source for the bill.** Only PITC's server (`bill.pitc.com.pk`) has the bill data;
+every FESCO bill website and app depends on it. When it does not accept connections, which happens around
+bill issue dates, no app can download a bill until it is back. This app just does the waiting for you.
+To check from outside Pakistan whether the server answers, run the *Check FESCO bill server* workflow
+in the Actions tab.
 
 PDFs come from the page's print output, the same as the site's **Print** button.
 The picture is made from that PDF.

@@ -131,7 +131,7 @@ object PitcHtml {
         return SearchForm(formAttrs["action"].orEmpty(), (formAttrs["method"] ?: "post").lowercase(), fields)
     }
 
-    private fun attributes(tagInner: String): Map<String, String> {
+    fun attributes(tagInner: String): Map<String, String> {
         val map = LinkedHashMap<String, String>()
         for (m in ATTR.findAll(tagInner)) {
             val name = m.groupValues[1].lowercase()
