@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.FescoBill" parent="Theme.MaterialComponents.Light.DarkActionBar">
+        <item name="colorPrimary">@color/fesco_blue</item>
+        <item name="colorPrimaryVariant">@color/fesco_blue_dark</item>
+        <item name="colorOnPrimary">@android:color/white</item>
+        <item name="colorSecondary">@color/fesco_orange</item>
+        <item name="colorSecondaryVariant">@color/fesco_orange_dark</item>
+        <item name="colorOnSecondary">@android:color/white</item>
+        <item name="android:statusBarColor">@color/fesco_blue_dark</item>
+        <item name="android:windowBackground">@color/screen_bg</item>
+    </style>
+</resources>

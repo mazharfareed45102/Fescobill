@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FESCO Bill</string>
+
+    <!-- Main screen -->
+    <string name="main_title">Check your FESCO electricity bill</string>
+    <string name="main_title_ur">اپنا فیسکو بجلی کا بل دیکھیں</string>
+    <string name="ref_hint">Reference No. / ریفرنس نمبر</string>
+    <string name="ref_helper">14 digits, e.g. 07 13523 0628703 R (or 10-digit Customer ID)</string>
+    <string name="ref_error">Enter the 14-digit reference number or 10-digit Customer ID\nبراہ کرم 14 ہندسوں کا ریفرنس نمبر درج کریں</string>
+    <string name="ref_ok_reference">Reference No. %1$s ✓</string>
+    <string name="ref_ok_customer">Customer ID %1$s ✓</string>
+    <string name="view_bill">View Bill  •  بل دیکھیں</string>
+    <string name="scan_camera">Scan Bill  •  تصویر لیں</string>
+    <string name="scan_gallery">From Gallery  •  گیلری</string>
+    <string name="scan_tip">Tip: take a clear, straight photo of the top part of the bill where \"REFERENCE No.\" is printed. The app reads the number for you.</string>
+    <string name="saved_title">Saved bills  •  محفوظ شدہ بل</string>
+    <string name="saved_empty">Bills you open are saved here, so next time you can open them with one tap.</string>
+    <string name="saved_hint">Tap to open. Press and hold to rename or delete.</string>
+    <string name="source_note">Bills are loaded directly from the official PITC / FESCO website (bill.pitc.com.pk). No ads, no other servers.</string>
+    <string name="reading_photo">Reading the bill…  •  بل پڑھا جا رہا ہے</string>
+
+    <!-- Scan results -->
+    <string name="scan_found_title">Number found  •  نمبر مل گیا</string>
+    <string name="scan_found_msg">%1$s\n\n%2$s\n\nPlease check that it matches your bill.</string>
+    <string name="scan_choose_title">Which one is your number?</string>
+    <string name="scan_none_title">Number not found</string>
+    <string name="scan_none_msg">Could not read the reference number from this photo.\n\nTry again in good light, holding the phone straight and close to the \"REFERENCE No.\" box, or type the number.</string>
+    <string name="scan_failed">Could not read this photo: %1$s</string>
+    <string name="no_camera_app">No camera app found on this phone.</string>
+    <string name="no_gallery_app">No gallery app found on this phone.</string>
+    <string name="label_reference">Reference No.</string>
+    <string name="label_reference_likely">Reference No. (most likely)</string>
+    <string name="label_customer_id">Customer ID</string>
+    <string name="label_old_account">Old A/C number (probably not this one)</string>
+    <string name="label_unknown">Number seen on the bill</string>
+    <string name="edit">Edit</string>
+    <string name="try_again">Try again</string>
+    <string name="ok">OK</string>
+    <string name="cancel">Cancel</string>
+
+    <!-- Saved bills -->
+    <string name="rename">Rename</string>
+    <string name="delete">Delete</string>
+    <string name="rename_title">Name for this bill</string>
+    <string name="rename_hint">e.g. Home, Shop, Abu ji</string>
+    <string name="delete_confirm">Remove %1$s from saved bills?</string>
+    <string name="last_opened">Last opened %1$s</string>
+
+    <!-- Bill screen -->
+    <string name="bill_title">Bill %1$s</string>
+    <string name="status_loading">Opening the official FESCO bill…  •  بل لوڈ ہو رہا ہے</string>
+    <string name="status_searching">Searching for your bill on the FESCO website…</string>
+    <string name="status_ready">Official bill loaded ✓  Use the buttons below to download or share.</string>
+    <string name="status_not_found">The FESCO website did not return a bill for %1$s. Please check the number.</string>
+    <string name="status_not_found_msg">FESCO website says: %1$s</string>
+    <string name="status_tap_search">Please tap the \"Search\" button on the page to continue.</string>
+    <string name="status_unexpected">The FESCO website showed an unexpected page. Tap ⟳ to try again or \"Open in browser\".</string>
+    <string name="error_title">Could not open the FESCO website</string>
+    <string name="error_network">Check that mobile data or Wi-Fi is on, then tap Try again.\n\n(%1$s)</string>
+    <string name="error_ssl">Secure connection failed. Make sure the phone\'s date and time are correct, then try again.</string>
+    <string name="error_http">The FESCO website is not responding right now (error %1$d). Please try again in a few minutes.</string>
+    <string name="open_in_browser">Open in browser</string>
+    <string name="refresh">Refresh</string>
+    <string name="print">Print</string>
+    <string name="download_pdf">PDF</string>
+    <string name="save_image">Image</string>
+    <string name="share">Share</string>
+    <string name="preparing_pdf">Preparing PDF…</string>
+    <string name="preparing_image">Preparing image…</string>
+    <string name="saved_pdf">PDF saved to Downloads/FESCO Bills</string>
+    <string name="saved_image">Image saved to Pictures/FESCO Bills (Gallery)</string>
+    <string name="open">Open</string>
+    <string name="downloading">Downloading to Downloads/FESCO Bills…</string>
+    <string name="save_failed">Could not save: %1$s</string>
+    <string name="no_pdf_viewer">No app found to open PDF files. The file is in Downloads/FESCO Bills.</string>
+    <string name="share_as">Share bill as</string>
+    <string name="share_pdf">PDF document</string>
+    <string name="share_image">Picture (for WhatsApp)</string>
+    <string name="pdf_fallback">Choose \"Save as PDF\" as the printer, then tap the download button.</string>
+    <string name="storage_permission_needed">Storage permission is needed to save the bill.</string>
+    <string name="wait_for_bill">Please wait until the bill is shown.</string>
+    <string name="no_browser">No web browser found on this phone.</string>
+</resources>
