@@ -2,6 +2,8 @@
 <paths>
     <cache-path name="scans" path="scans/" />
     <cache-path name="bills" path="bills/" />
+    <!-- Saved copies of bills (opened in a PDF viewer to print). -->
+    <files-path name="saved" path="bill-cache/" />
     <!-- Files saved to the public Downloads / Pictures folders on Android 9 and older. -->
     <external-path name="external" path="." />
 </paths>

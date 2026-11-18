@@ -71,6 +71,9 @@ dependencies {
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     // On-device text recognition, bundled in the APK (works offline, no Play download needed).
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    // Direct, parallel requests to the bill site (much faster than waiting on one slow page load).
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }

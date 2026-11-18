@@ -32,6 +32,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var savedHint: TextView
     private lateinit var busyOverlay: View
     private lateinit var store: SavedBills
+    private lateinit var cache: BillCache
     private lateinit var scanner: OcrScanner
 
     /** Fixed location, so the photo is still found if Android closed the app while the camera was open. */
@@ -50,6 +51,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         store = SavedBills(this)
+        cache = BillCache(this)
         scanner = OcrScanner(this)
 
         refLayout = findViewById(R.id.refLayout)
@@ -230,9 +232,12 @@ class MainActivity : AppCompatActivity() {
                 R.string.last_opened,
                 DateUtils.getRelativeTimeSpanString(e.lastOpened, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS)
             )
+            val saved = cache.get(e.digits)?.let {
+                if (it.month.isNotBlank()) getString(R.string.saved_on_phone, it.month) else getString(R.string.saved_on_phone_no_month)
+            }
             row.findViewById<TextView>(R.id.savedName).text = e.name.ifBlank { e.query.display }
             row.findViewById<TextView>(R.id.savedNumber).text =
-                if (e.name.isBlank()) opened else "${e.query.display}  •  $opened"
+                listOfNotNull(e.query.display.takeIf { e.name.isNotBlank() }, saved, opened).joinToString("  •  ")
             row.setOnClickListener { openBill(e.query) }
             row.setOnLongClickListener {
                 showEntryMenu(e)
@@ -280,6 +285,7 @@ class MainActivity : AppCompatActivity() {
             .setMessage(getString(R.string.delete_confirm, title))
             .setPositiveButton(R.string.delete) { _, _ ->
                 store.delete(e.digits)
+                cache.delete(e.digits)
                 renderSaved()
             }
             .setNegativeButton(R.string.cancel, null)

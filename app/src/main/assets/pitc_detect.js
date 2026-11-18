@@ -36,8 +36,16 @@
       }
     }
     var bill = found >= 6 || (billUrl && found >= 3);
+    // Bill month (e.g. "OCT 26"): the first month token after the "BILL MONTH" label. Same as PitcHtml.billMonth.
+    var month = '';
+    var at = text.indexOf('BILL MONTH');
+    if (bill && at >= 0) {
+      var m = /(?:^|[^A-Z0-9])(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[ -]?(\d{2})(?![0-9])/
+        .exec(text.substring(at + 10, at + 410));
+      if (m) month = m[1] + ' ' + m[2];
+    }
     return JSON.stringify({ bill: bill, form: form, markers: found, billUrl: billUrl,
-      message: message, url: location.href });
+      message: message, month: month, url: location.href });
   } catch (e) {
     return JSON.stringify({ bill: false, form: false, markers: 0, message: '', error: String(e) });
   }

@@ -35,6 +35,13 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
+        <!-- The saved copy of this bill, shown instantly while the live bill loads underneath -->
+        <WebView
+            android:id="@+id/cachedView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+
         <LinearLayout
             android:id="@+id/errorPanel"
             android:layout_width="match_parent"

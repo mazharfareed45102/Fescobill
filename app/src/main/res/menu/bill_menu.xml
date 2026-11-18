@@ -15,4 +15,8 @@
         android:id="@+id/action_browser"
         android:title="@string/open_in_browser"
         app:showAsAction="never" />
+    <item
+        android:id="@+id/action_details"
+        android:title="@string/details_title"
+        app:showAsAction="never" />
 </menu>
