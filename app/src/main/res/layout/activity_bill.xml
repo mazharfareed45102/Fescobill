@@ -122,6 +122,17 @@
         android:padding="8dp">
 
         <com.google.android.material.button.MaterialButton
+            android:id="@+id/batchSkipButton"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:text="@string/batch_skip"
+            android:textAllCaps="false"
+            android:textSize="15sp"
+            android:visibility="gone" />
+
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/pdfButton"
             android:layout_width="0dp"
             android:layout_height="56dp"

@@ -20,6 +20,12 @@ object PitcPages {
         </form></body></html>
     """.trimIndent()
 
+    /** The search form with a code picture (captcha), which only a person can type. */
+    fun formWithCode(error: String = "") = form(error = error).replace(
+        "<input type=\"submit\"",
+        "<img id=\"captchaImage\" src=\"/captcha.png\" alt=\"code\"><input type=\"text\" name=\"CaptchaCode\" id=\"CaptchaCode\">\n          <input type=\"submit\"",
+    )
+
     fun bill() = """
         <!doctype html><html><head><title>FESCO Bill</title></head><body>
         <table><tr><td>CONNECTION DATE</td><td>CONNECTED LOAD</td><td>BILL MONTH</td><td>READING DATE</td><td>ISSUE DATE</td><td>DUE DATE</td></tr>

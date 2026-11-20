@@ -122,6 +122,19 @@
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/batchButton"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="64dp"
+                android:layout_marginTop="12dp"
+                android:text="@string/batch_open"
+                android:textAllCaps="false"
+                android:textSize="16sp"
+                app:cornerRadius="10dp"
+                app:icon="@drawable/ic_receipt"
+                app:iconGravity="textStart" />
+
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

@@ -64,6 +64,9 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.viewBillButton).setOnClickListener { openFromInput() }
         findViewById<View>(R.id.scanCameraButton).setOnClickListener { launchCamera() }
         findViewById<View>(R.id.scanGalleryButton).setOnClickListener { launchGallery() }
+        findViewById<View>(R.id.batchButton).setOnClickListener {
+            startActivity(android.content.Intent(this, BatchActivity::class.java))
+        }
 
         refInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_GO) {

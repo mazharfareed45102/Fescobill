@@ -30,6 +30,7 @@ class BillFetcherTest {
     private var hangFirst = 0
     private var failFirst = 0
     private var alwaysFail = false
+    private var codePage = false
 
     private val client = OkHttpClient.Builder()
         .readTimeout(10, TimeUnit.SECONDS)
@@ -55,7 +56,7 @@ class BillFetcherTest {
                             else -> html("<html><body>No record</body></html>")
                         }
                     }
-                    request.method == "GET" && path == "/fescobill" -> html(PitcPages.form())
+                    request.method == "GET" && path == "/fescobill" -> html(if (codePage) PitcPages.formWithCode() else PitcPages.form())
                     request.method == "POST" && path == "/fescobill" -> {
                         val f = parseForm(request.body.readUtf8())
                         synchronized(posts) { posts += f }
@@ -202,6 +203,16 @@ class BillFetcherTest {
         r as BillFetcher.Result.Bill
         assertTrue(used.toString(), used.contains("Wi-Fi") && used.contains("mobile data"))
         assertTrue(r.route == "Wi-Fi")
+    }
+
+    @Test
+    fun codePageIsLeftToThePerson() {
+        needsSession = true
+        codePage = true
+        val (r, _) = run(fetcher(hedge = longArrayOf(0)), ref)
+        assertTrue(r === BillFetcher.Result.NeedsPerson)
+        // The form with the code is never sent by the app.
+        assertTrue(synchronized(posts) { posts.isEmpty() })
     }
 
     @Test

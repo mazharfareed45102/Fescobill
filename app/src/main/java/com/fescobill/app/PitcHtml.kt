@@ -60,6 +60,14 @@ object PitcHtml {
 
     fun hasSearchForm(html: String): Boolean = SEARCH_BOX.containsMatchIn(html)
 
+    private val CAPTCHA_TAG = Regex("<(img|input|canvas|div|iframe|span)\\b[^>]*(captcha|g-recaptcha|h-captcha|cf-turnstile)",
+        RegexOption.IGNORE_CASE)
+    private val CAPTCHA_SCRIPT = Regex("recaptcha/api|hcaptcha\\.com|challenges\\.cloudflare\\.com/turnstile",
+        RegexOption.IGNORE_CASE)
+
+    /** True when the page asks for a code (captcha), which a person has to type. */
+    fun hasCaptcha(html: String): Boolean = CAPTCHA_TAG.containsMatchIn(html) || CAPTCHA_SCRIPT.containsMatchIn(html)
+
     /** The bill month printed on the bill, e.g. "OCT 26", or null. */
     fun billMonth(html: String): String? = billMonthFromText(visibleText(html).uppercase())
 

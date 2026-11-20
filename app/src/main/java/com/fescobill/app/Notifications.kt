@@ -23,6 +23,10 @@ object Notifications {
         post(context, q, context.getString(R.string.notif_notfound_title), text)
     }
 
+    fun needsCode(context: Context, q: BillQuery) {
+        post(context, q, context.getString(R.string.notif_code_title), context.getString(R.string.notif_code_text, q.display))
+    }
+
     fun gaveUp(context: Context, q: BillQuery) {
         post(context, q, context.getString(R.string.notif_gaveup_title), context.getString(R.string.notif_gaveup_text))
     }

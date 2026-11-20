@@ -58,6 +58,14 @@ class PitcHtmlTest {
     }
 
     @Test
+    fun recognisesCodePage() {
+        assertTrue(PitcHtml.hasCaptcha(PitcPages.formWithCode()))
+        assertTrue(PitcHtml.hasCaptcha("<div class=\"g-recaptcha\" data-sitekey=\"x\"></div>"))
+        assertFalse(PitcHtml.hasCaptcha(PitcPages.form()))
+        assertFalse(PitcHtml.hasCaptcha(PitcPages.bill()))
+    }
+
+    @Test
     fun noFormMeansNull() {
         assertNull(PitcHtml.searchForm(PitcPages.bill(), PitcPages.REF, SearchMode.REFERENCE))
     }

@@ -36,7 +36,7 @@ class BillCache(context: Context) {
         val page = File(dir, PAGE).takeIf { it.isFile && it.length() > 0 }
         val pdf = File(dir, PDF).takeIf { it.isFile && it.length() > 0 }
         val png = File(dir, PNG).takeIf { it.isFile && it.length() > 0 }
-        if (page == null && pdf == null) return null
+        if (page == null && pdf == null && png == null) return null
         val meta = readMeta(dir)
         val legacy = meta.optLong("savedAt", pdf?.lastModified() ?: 0L)
         Entry(
@@ -74,6 +74,18 @@ class BillCache(context: Context) {
             if (png != null) copyInto(png, pngTarget) else pngTarget.delete()
             val meta = readMeta(dir)
             meta.put("filesAt", System.currentTimeMillis())
+            if (month.isNotBlank()) meta.put("month", month)
+            writeMeta(dir, meta)
+        }
+        return get(digits)!!
+    }
+
+    /** Saves just a picture of the bill (when this phone cannot make a PDF directly). */
+    fun putPicture(digits: String, png: File, month: String): Entry {
+        synchronized(LOCK) {
+            val dir = dirFor(digits)
+            copyInto(png, File(dir, PNG))
+            val meta = readMeta(dir)
             if (month.isNotBlank()) meta.put("month", month)
             writeMeta(dir, meta)
         }

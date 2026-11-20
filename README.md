@@ -13,6 +13,12 @@ A simple, ad-free Android app to view, download and share your **FESCO electrici
   It shows at once, even without internet, while the app checks FESCO for a newer bill in the background.
 - **Fast even when the FESCO site is slow**: the app asks the site over several connections at once
   (over Wi-Fi and mobile data), retries failed requests by itself and uses whichever answer arrives first.
+- **Several bills at once**: paste the numbers (e.g. a WhatsApp message), pick several bill photos or choose
+  saved bills. The app opens each bill in turn, saves it as a picture and shows all of them at the end, with
+  Save / Share for each bill plus **Share all** and **Save all**.
+- **When the FESCO page asks for a code (captcha)**: the app fills in the reference number and puts the
+  cursor in the code box; you type the code and tap Search. The app does not read or fill in codes itself:
+  they exist so that a person makes the request.
 - **When the FESCO server is down**: the app says so plainly, keeps trying every 15 minutes in the
   background (also when closed) and sends a notification as soon as the bill is downloaded.
   The bill amount can meanwhile be requested by SMS (PITC SMS service, 8334).

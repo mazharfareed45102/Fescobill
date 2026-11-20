@@ -54,6 +54,11 @@ class BillRetryWorker(context: Context, params: WorkerParameters) : Worker(conte
                 Notifications.notFound(ctx, query, r.message)
             }
             is BillFetcher.Result.Failed -> Unit // try again at the next run
+            BillFetcher.Result.NeedsPerson -> {
+                // Only a person can type the site's code: stop and ask them to open the bill.
+                cancel(ctx, digits)
+                Notifications.needsCode(ctx, query)
+            }
         }
         return Result.success()
     }

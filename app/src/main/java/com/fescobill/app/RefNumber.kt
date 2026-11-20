@@ -40,6 +40,51 @@ object RefNumber {
         }
     }
 
+    private val NUMBER_RUN = Regex("\\d[\\d \\t\\-]*\\d")
+    private val SEPARATORS = Regex("[ \\t\\-]+")
+
+    /**
+     * Every reference number (14 digits) and customer ID (10 digits) in a text, e.g. a WhatsApp
+     * message with several bills, in order and without repeats. Spaces and dashes inside a number
+     * ("07 13523 0628703") are allowed; numbers on separate lines or after each other both work.
+     */
+    fun findAll(text: String): List<BillQuery> {
+        val ascii = buildString {
+            for (c in text) {
+                val d = Character.digit(c, 10)
+                append(if (d >= 0 && !c.isWhitespace()) '0' + d else c)
+            }
+        }
+        val out = LinkedHashMap<String, BillQuery>()
+        for (m in NUMBER_RUN.findAll(ascii)) {
+            val groups = m.value.split(SEPARATORS).filter { it.isNotEmpty() }
+            val whole = parse(groups.joinToString(""))
+            if (whole != null) {
+                out.putIfAbsent(whole.digits, whole)
+                continue
+            }
+            // Several numbers on one line: take each group, joining split-up ones ("07 13523 0628703").
+            var i = 0
+            while (i < groups.size) {
+                var joined = ""
+                var used = 0
+                for (j in i until groups.size) {
+                    joined += groups[j]
+                    if (joined.length > REFERENCE_LENGTH) break
+                    if (joined.length == REFERENCE_LENGTH || (joined.length == CUSTOMER_ID_LENGTH && j == i)) used = j - i + 1
+                }
+                if (used > 0) {
+                    val q = parse(groups.subList(i, i + used).joinToString(""))!!
+                    out.putIfAbsent(q.digits, q)
+                    i += used
+                } else {
+                    i++
+                }
+            }
+        }
+        return out.values.toList()
+    }
+
     /** "07135230628703" -> "07 13523 0628703" (batch, sub-division, account). */
     fun format(digits: String): String =
         if (digits.length == REFERENCE_LENGTH) {

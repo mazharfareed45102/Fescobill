@@ -36,6 +36,16 @@
       }
     }
     var bill = found >= 6 || (billUrl && found >= 3);
+    // Does the page ask for a code (captcha)? Then a person has to type it.
+    var captcha = false;
+    try {
+      captcha = !!document.querySelector('img[src*="aptcha" i], img[id*="aptcha" i], img[class*="aptcha" i], ' +
+        'img[alt*="aptcha" i], input[name*="aptcha" i], input[id*="aptcha" i], canvas[id*="aptcha" i], ' +
+        'canvas[class*="aptcha" i], .g-recaptcha, .h-captcha, .cf-turnstile, iframe[src*="recaptcha"], ' +
+        'iframe[src*="hcaptcha"], iframe[src*="turnstile"]');
+    } catch (e) {
+      captcha = /captcha/i.test((document.documentElement.innerHTML || '').substring(0, 300000));
+    }
     // Bill month (e.g. "OCT 26"): the first month token after the "BILL MONTH" label. Same as PitcHtml.billMonth.
     var month = '';
     var at = text.indexOf('BILL MONTH');
@@ -44,7 +54,7 @@
         .exec(text.substring(at + 10, at + 410));
       if (m) month = m[1] + ' ' + m[2];
     }
-    return JSON.stringify({ bill: bill, form: form, markers: found, billUrl: billUrl,
+    return JSON.stringify({ bill: bill, form: form, captcha: captcha && !bill, markers: found, billUrl: billUrl,
       message: message, month: month, url: location.href });
   } catch (e) {
     return JSON.stringify({ bill: false, form: false, markers: 0, message: '', error: String(e) });

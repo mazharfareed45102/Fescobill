@@ -76,6 +76,9 @@ class BillFetcher(
 
         class NotFound(val message: String) : Result()
         class Failed(val reason: String, val problem: Problem) : Result()
+
+        /** The site asks for a code (captcha); a person has to type it in the browser view. */
+        object NeedsPerson : Result()
     }
 
     private sealed class Outcome {
@@ -203,6 +206,7 @@ class BillFetcher(
                             is Result.Bill -> "bill received"
                             is Result.NotFound -> "site says: ${r.message}"
                             is Result.Failed -> r.reason
+                            Result.NeedsPerson -> "the site asks for a code (captcha)"
                         }
                     })
                     handle(outcome)
@@ -279,17 +283,20 @@ class BillFetcher(
             var page = get(client, "$formUrl/general?${query.mode.param}=${query.digits}")
             if (page.code >= 500) return Outcome.Retry("server error ${page.code}", Problem.SERVER)
             if (page.ok && PitcHtml.isBill(page.html, page.url)) return bill(page, jar, client, route)
+            if (page.ok && PitcHtml.hasCaptcha(page.html)) return Outcome.Done(Result.NeedsPerson)
 
             if (!page.ok || !PitcHtml.hasSearchForm(page.html)) {
                 page = get(client, formUrl)
                 if (!page.ok) return Outcome.Retry("server error ${page.code}", Problem.SERVER)
             }
             repeat(2) {
+                if (PitcHtml.hasCaptcha(page.html)) return Outcome.Done(Result.NeedsPerson)
                 val form = PitcHtml.searchForm(page.html, query.digits, query.mode)
                     ?: return Outcome.Retry("search page not recognised", Problem.UNEXPECTED)
                 val answer = submit(client, page, form)
                 if (answer.code >= 500) return Outcome.Retry("server error ${answer.code}", Problem.SERVER)
                 if (answer.ok && PitcHtml.isBill(answer.html, answer.url)) return bill(answer, jar, client, route)
+                if (PitcHtml.hasCaptcha(answer.html)) return Outcome.Done(Result.NeedsPerson)
                 if (!PitcHtml.hasSearchForm(answer.html)) {
                     return Outcome.Retry("unexpected answer (${answer.code})", Problem.UNEXPECTED)
                 }
