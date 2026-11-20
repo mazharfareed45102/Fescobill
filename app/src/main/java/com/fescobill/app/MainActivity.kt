@@ -35,6 +35,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cache: BillCache
     private lateinit var scanner: OcrScanner
 
+    /** What the last bill photo said, to check the downloaded bill against. */
+    private var scannedDigits: String? = null
+    private var scannedConsumerId: String? = null
+
     /** Fixed location, so the photo is still found if Android closed the app while the camera was open. */
     private val photoFile: File by lazy { File(cacheDir, "scans/bill_photo.jpg") }
 
@@ -107,11 +111,18 @@ class MainActivity : AppCompatActivity() {
             return
         }
         hideKeyboard()
-        openBill(q)
+        // The Consumer ID from the last photo still applies if the number is (a correction of) the one read from it.
+        val expect = scannedConsumerId?.takeIf {
+            val from = scannedDigits
+            from != null && from.length == q.digits.length && ReadingVote.hamming(from, q.digits) <= 4
+        }
+        openBill(q, expect)
     }
 
-    private fun openBill(q: BillQuery) {
-        startActivity(BillActivity.intent(this, q))
+    private fun openBill(q: BillQuery, expectConsumerId: String? = null) {
+        startActivity(BillActivity.intent(this, q).apply {
+            if (expectConsumerId != null) putExtra(BillActivity.EXTRA_EXPECT_ID, expectConsumerId)
+        })
     }
 
     // ---- Photo scanning -------------------------------------------------------------------
@@ -140,9 +151,9 @@ class MainActivity : AppCompatActivity() {
         busyOverlay.isVisible = true
         scanner.scan(
             uri,
-            onResult = { candidates ->
+            onResult = { result ->
                 busyOverlay.isVisible = false
-                showScanResult(candidates)
+                showScanResult(result)
             },
             onError = { e ->
                 busyOverlay.isVisible = false
@@ -156,9 +167,11 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun showScanResult(candidates: List<Candidate>) {
+    /** Shows the number read from the photo next to the enlarged picture of it, for the person to confirm. */
+    private fun showScanResult(result: OcrScanner.ScanResult) {
         if (isFinishing || isDestroyed) return
-        if (candidates.isEmpty()) {
+        val best = result.best
+        if (best == null) {
             MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.scan_none_title)
                 .setMessage(R.string.scan_none_msg)
@@ -167,46 +180,38 @@ class MainActivity : AppCompatActivity() {
                 .show()
             return
         }
-
-        if (RefExtractor.isConfident(candidates)) {
-            val best = candidates[0]
-            fillInput(best)
-            MaterialAlertDialogBuilder(this)
-                .setTitle(R.string.scan_found_title)
-                .setMessage(getString(R.string.scan_found_msg, best.display, describe(best, true)))
-                .setPositiveButton(R.string.view_bill) { _, _ -> openBill(best.toQuery()) }
-                .setNegativeButton(R.string.edit) { _, _ -> focusInput() }
-                .show()
-            return
+        scannedDigits = best.query.digits
+        scannedConsumerId = result.consumerId
+        fillDigits(best.query.digits)
+        val builder = MaterialAlertDialogBuilder(this)
+            .setTitle(if (best.consensus.sure) R.string.scan_found_title else R.string.scan_check_title)
+            .setView(ScanViews.proofView(this, best, result.consumerId))
+            .setPositiveButton(R.string.view_bill) { _, _ -> openBill(best.query, result.consumerId) }
+            .setNeutralButton(R.string.correct_it) { _, _ -> focusInput() }
+        if (result.others.isNotEmpty()) {
+            builder.setNegativeButton(R.string.other_number) { _, _ -> chooseOther(result) }
+        } else {
+            builder.setNegativeButton(R.string.cancel, null)
         }
+        builder.show()
+    }
 
-        val shown = candidates.take(5)
-        var chosen = 0
-        fillInput(shown[0])
-        val items = shown.mapIndexed { i, c -> "${c.display}\n${describe(c, i == 0)}" }.toTypedArray<CharSequence>()
+    private fun chooseOther(result: OcrScanner.ScanResult) {
+        val shown = result.others.take(5)
+        val items = shown.map { c -> "${c.display}\n${ScanViews.kindText(this, c)}" }.toTypedArray<CharSequence>()
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.scan_choose_title)
-            .setSingleChoiceItems(items, 0) { _, which ->
-                chosen = which
-                fillInput(shown[which])
+            .setItems(items) { _, which ->
+                scannedDigits = shown[which].digits
+                fillDigits(shown[which].digits)
+                focusInput()
             }
-            .setPositiveButton(R.string.view_bill) { _, _ -> openBill(shown[chosen].toQuery()) }
-            .setNegativeButton(R.string.edit) { _, _ -> focusInput() }
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
-    private fun describe(c: Candidate, first: Boolean): String = getString(
-        when {
-            c.mode == SearchMode.CUSTOMER_ID -> R.string.label_customer_id
-            c.label == LabelKind.OLD_ACCOUNT -> R.string.label_old_account
-            c.label == LabelKind.REFERENCE || c.suffix != null -> R.string.label_reference
-            first -> R.string.label_reference_likely
-            else -> R.string.label_unknown
-        }
-    )
-
-    private fun fillInput(c: Candidate) {
-        refInput.setText(c.digits)
+    private fun fillDigits(digits: String) {
+        refInput.setText(digits)
         refInput.setSelection(refInput.text?.length ?: 0)
     }
 

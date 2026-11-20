@@ -9,8 +9,13 @@ data class Box(val left: Int, val top: Int, val right: Int, val bottom: Int) {
     val centerY: Int get() = (top + bottom) / 2
 }
 
-/** One line of text found by OCR, with its position in the upright image (null if unknown). */
-data class OcrLine(val text: String, val box: Box?)
+/**
+ * One line of text found by OCR, with its position in the upright image (null if unknown) and,
+ * if known, how sure the reader was of each character (0..1, same length as [text]).
+ */
+class OcrLine(val text: String, val box: Box?, val charConfidence: FloatArray? = null) {
+    fun copy(text: String = this.text, box: Box? = this.box) = OcrLine(text, box, charConfidence?.takeIf { text == this.text })
+}
 
 /** The printed label closest to a number on the bill, e.g. "REFERENCE No." above it. */
 enum class LabelKind { REFERENCE, OLD_ACCOUNT, CONSUMER_ID, OTHER }
@@ -22,6 +27,10 @@ data class Candidate(
     val suffix: Char?,
     val score: Int,
     val label: LabelKind?,
+    /** Where the number is in the photo (upright coordinates), for zooming in on it. */
+    val box: Box? = null,
+    /** How sure the reader was of each digit (0..1), if known. */
+    val confidence: FloatArray? = null,
 ) {
     val display: String get() = RefNumber.format(digits) + (suffix?.let { " $it" } ?: "")
     fun toQuery() = BillQuery(digits, mode)
@@ -54,7 +63,7 @@ object RefExtractor {
         ),
     )
 
-    private class Group(val digits: String, val real: Int, val start: Int, val end: Int)
+    private class Group(val digits: String, val real: Int, val start: Int, val end: Int, val indices: IntArray)
 
     private class RawNumber(
         val digits: String,
@@ -65,6 +74,8 @@ object RefExtractor {
         val groupSizes: List<Int>,
         val mapped: Int,
         val trimmed: Boolean,
+        /** Position in the line of each digit. */
+        val indices: IntArray,
     )
 
     private class Label(val kind: LabelKind, val box: Box, val line: Int)
@@ -85,9 +96,12 @@ object RefExtractor {
 
         val best = LinkedHashMap<String, Candidate>()
         placed.forEachIndexed { i, (text, box) ->
+            val charConf = lines[i].charConfidence?.takeIf { it.size == text.length }
             for (n in findNumbers(text)) {
-                val label = nearestLabel(spanBox(box, text, n.start, n.end), i, labels)
-                val c = Candidate(n.digits, n.mode, n.suffix, score(n, label), label)
+                val span = spanBox(box, text, n.start, n.end)
+                val label = nearestLabel(span, i, labels)
+                val conf = charConf?.let { cc -> FloatArray(n.indices.size) { k -> cc[n.indices[k]] } }
+                val c = Candidate(n.digits, n.mode, n.suffix, score(n, label), label, span.takeIf { lines[i].box != null }, conf)
                 val prev = best[c.digits]
                 best[c.digits] = when {
                     prev == null -> c
@@ -124,11 +138,13 @@ object RefExtractor {
         for (run in RUN.findAll(text)) {
             val base = run.range.first
             val groups = GROUP.findAll(run.value).map { g ->
+                val start = base + g.range.first
                 Group(
                     digits = g.value.map(::toDigit).joinToString(""),
                     real = g.value.count { it in '0'..'9' },
-                    start = base + g.range.first,
+                    start = start,
                     end = base + g.range.last + 1,
+                    indices = IntArray(g.value.length) { start + it },
                 )
             }.toList()
 
@@ -145,21 +161,24 @@ object RefExtractor {
                     val start = parts.first().start
                     val end = parts.last().end
                     val sizes = parts.map { it.digits.length }
+                    val indices = parts.flatMap { it.indices.toList() }.toIntArray()
                     when {
                         len == RefNumber.REFERENCE_LENGTH -> out += RawNumber(
-                            digits, SearchMode.REFERENCE, suffixAfter(text, end), start, end, sizes, mapped, false
+                            digits, SearchMode.REFERENCE, suffixAfter(text, end), start, end, sizes, mapped, false, indices
                         )
                         len == RefNumber.CUSTOMER_ID_LENGTH -> out += RawNumber(
-                            digits, SearchMode.CUSTOMER_ID, null, start, end, sizes, mapped, false
+                            digits, SearchMode.CUSTOMER_ID, null, start, end, sizes, mapped, false, indices
                         )
                         // One stray character glued to a reference number, e.g. the R read as "8",
                         // or a table border read as "1": offer both 14-digit halves, ranked low.
                         len == 15 && i == j -> {
                             out += RawNumber(
-                                digits.substring(0, 14), SearchMode.REFERENCE, null, start, end, listOf(14), mapped, true
+                                digits.substring(0, 14), SearchMode.REFERENCE, null, start, end, listOf(14), mapped, true,
+                                indices.copyOfRange(0, 14),
                             )
                             out += RawNumber(
-                                digits.substring(1), SearchMode.REFERENCE, null, start, end, listOf(14), mapped, true
+                                digits.substring(1), SearchMode.REFERENCE, null, start, end, listOf(14), mapped, true,
+                                indices.copyOfRange(1, 15),
                             )
                         }
                     }

@@ -98,6 +98,11 @@ class BillActivity : AppCompatActivity() {
 
         private const val EXTRA_BATCH_INDEX = "batchIndex"
         private const val EXTRA_BATCH_TOTAL = "batchTotal"
+        /** Consumer ID read from the bill photo: the downloaded bill is checked against it. */
+        const val EXTRA_EXPECT_ID = "expectId"
+        const val RESULT_VERIFIED = "verified"
+        const val VERIFIED_MATCH = "match"
+        const val VERIFIED_MISMATCH = "mismatch"
         const val RESULT_DIGITS = "digits"
         const val RESULT_STATUS = "status"
         const val STATUS_OK = "ok"
@@ -112,8 +117,10 @@ class BillActivity : AppCompatActivity() {
             Intent(context, BillActivity::class.java).putExtra(EXTRA_DIGITS, q.digits)
 
         /** One bill of several: saves it and returns to [BatchActivity] by itself. */
-        fun batchIntent(context: Context, q: BillQuery, index: Int, total: Int): Intent =
-            intent(context, q).putExtra(EXTRA_BATCH_INDEX, index).putExtra(EXTRA_BATCH_TOTAL, total)
+        fun batchIntent(context: Context, q: BillQuery, index: Int, total: Int, expectConsumerId: String? = null): Intent =
+            intent(context, q).putExtra(EXTRA_BATCH_INDEX, index).putExtra(EXTRA_BATCH_TOTAL, total).apply {
+                if (expectConsumerId != null) putExtra(EXTRA_EXPECT_ID, expectConsumerId)
+            }
     }
 
     /** What the main WebView is doing. */
@@ -123,6 +130,8 @@ class BillActivity : AppCompatActivity() {
     private enum class Shown { NONE, SAVED, LIVE }
 
     private enum class Check { RUNNING, SAME, NEWER, FAILED, NOT_FOUND, PERSON }
+
+    private enum class Verify { NONE, PENDING, MATCH, MISMATCH }
 
     private enum class Tone(@ColorRes val color: Int) {
         INFO(R.color.banner_info_bg), OK(R.color.banner_ok_bg), WARN(R.color.banner_warn_bg), ERROR(R.color.banner_error_bg)
@@ -199,11 +208,14 @@ class BillActivity : AppCompatActivity() {
     private var batchFinishing = false
     private var personMessage = ""
     private var personFilledToken = -1
+    private var expectId: String? = null
+    private var verify = Verify.NONE
 
     private val detectJs by lazy { asset("pitc_detect.js") }
     private val fillJs by lazy { asset("pitc_fill.js") }
     private val hooksJs by lazy { asset("pitc_hooks.js") }
     private val fitJs by lazy { asset("pitc_fit.js") }
+    private val idsJs by lazy { asset("pitc_ids.js") }
 
     private val storagePermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -237,6 +249,7 @@ class BillActivity : AppCompatActivity() {
         batchTotal = intent.getIntExtra(EXTRA_BATCH_TOTAL, 0)
         batchIndex = intent.getIntExtra(EXTRA_BATCH_INDEX, 0)
         batch = batchTotal > 0
+        expectId = intent.getStringExtra(EXTRA_EXPECT_ID)?.takeIf { it.length == RefNumber.CUSTOMER_ID_LENGTH }
 
         // Lets the whole bill (not only the visible part) be drawn into a picture if a phone cannot make PDFs.
         WebView.enableSlowWholeDocumentDraw()
@@ -471,6 +484,7 @@ class BillActivity : AppCompatActivity() {
         event("open ${Pitc.billUrl(query)}" + (c?.let { " (saved copy: ${it.month.ifBlank { "yes" }})" } ?: ""))
         personMessage = ""
         personFilledToken = -1
+        verify = Verify.NONE
         // Several bills: use a saved copy only if it is recent; otherwise get the bill live.
         val useSaved = !batch || (c != null && System.currentTimeMillis() - c.pageAt < FRESH_MS)
         val savedHtml = if (useSaved) c?.page?.let { runCatching { it.readText() }.getOrNull() } else null
@@ -661,13 +675,24 @@ class BillActivity : AppCompatActivity() {
         if (!batch || batchFinishing) return
         batchFinishing = true
         event("done: $status")
-        setResult(RESULT_OK, Intent().putExtra(RESULT_DIGITS, query.digits).putExtra(RESULT_STATUS, status))
+        val verified = when (verify) {
+            Verify.MATCH -> VERIFIED_MATCH
+            Verify.MISMATCH -> VERIFIED_MISMATCH
+            else -> ""
+        }
+        setResult(RESULT_OK, Intent().putExtra(RESULT_DIGITS, query.digits).putExtra(RESULT_STATUS, status)
+            .putExtra(RESULT_VERIFIED, verified))
         showBanner(getString(if (status == STATUS_OK || status == STATUS_SAVED_COPY) R.string.batch_saved_next else R.string.batch_next), Tone.OK)
         handler.postDelayed({ if (!isFinishing) finish() }, 700)
     }
 
     /** Several bills: the bill is on screen; make sure its picture is saved, then move on. */
-    private fun finishBatchWith(files: Files?) {
+    private fun finishBatchWith(files: Files?, waited: Int = 0) {
+        if (verify == Verify.PENDING && waited < 10) {
+            // Let the check against the photo finish first (it takes a moment).
+            handler.postDelayed({ finishBatchWith(files, waited + 1) }, 300)
+            return
+        }
         if (files?.png != null) {
             finishBatch(STATUS_OK)
             return
@@ -881,8 +906,33 @@ class BillActivity : AppCompatActivity() {
             requestFiles { files -> if (batch) finishBatchWith(files) }
         }
         fitToWidth()
+        checkAgainstPhoto()
         updateButtons()
         updateBanner()
+    }
+
+    /**
+     * A bill photo was read: the Consumer ID on it must also be on this bill. If a digit of the
+     * reference number had been read wrong, this would be someone else's bill with another Consumer ID.
+     */
+    private fun checkAgainstPhoto() {
+        val id = expectId ?: return
+        verify = Verify.PENDING
+        webView.evaluateJavascript(idsJs) { raw ->
+            val ids = try {
+                val json = JSONTokener(raw ?: "null").nextValue() as? String
+                if (json == null) emptyList() else org.json.JSONArray(json).let { a -> (0 until a.length()).map { a.optString(it) } }
+            } catch (e: JSONException) {
+                emptyList()
+            }
+            verify = when {
+                id in ids -> Verify.MATCH
+                ids.isNotEmpty() -> Verify.MISMATCH
+                else -> Verify.NONE
+            }
+            event("check against photo (Consumer ID $id): $verify")
+            updateBanner()
+        }
     }
 
     private fun fitToWidth() {
@@ -963,7 +1013,19 @@ class BillActivity : AppCompatActivity() {
                 lines.joinToString("\n") to (if (secs >= SLOW_AFTER_S) Tone.WARN else Tone.INFO)
             }
         }
-        showBanner(text, tone)
+        var finalText = text
+        var finalTone = tone
+        if (shown != Shown.NONE) {
+            when (verify) {
+                Verify.MATCH -> finalText += "\n" + getString(R.string.verify_match, expectId)
+                Verify.MISMATCH -> {
+                    finalText += "\n" + getString(R.string.verify_mismatch, expectId)
+                    finalTone = Tone.WARN
+                }
+                else -> Unit
+            }
+        }
+        showBanner(finalText, finalTone)
     }
 
     private fun showBanner(text: String, tone: Tone) {

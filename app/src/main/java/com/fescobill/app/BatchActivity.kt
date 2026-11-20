@@ -36,7 +36,10 @@ import java.util.concurrent.Executors
  */
 class BatchActivity : AppCompatActivity() {
 
-    private class Item(val query: BillQuery, var status: String? = null)
+    private class Item(val query: BillQuery, var status: String? = null, var verified: String = "")
+
+    /** A number read from one of the chosen photos, for the person to check before it is used. */
+    private class PhotoNumber(var query: BillQuery?, val verified: OcrScanner.Verified?, val consumerId: String?)
 
     private lateinit var input: TextInputEditText
     private lateinit var foundText: TextView
@@ -58,6 +61,8 @@ class BatchActivity : AppCompatActivity() {
     /** Re-running a single bill from the results ("Try again"). */
     private var single = false
     private var pendingStorageAction: (() -> Unit)? = null
+    /** Consumer ID read from the photo of each bill (reference digits -> consumer ID), to check the downloaded bill. */
+    private val expectIds = HashMap<String, String>()
 
     private val billLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         val status = if (r.resultCode == RESULT_OK) r.data?.getStringExtra(BillActivity.RESULT_STATUS) else null
@@ -67,7 +72,10 @@ class BatchActivity : AppCompatActivity() {
             showResults()
             return@registerForActivityResult
         }
-        items.getOrNull(next)?.status = status
+        items.getOrNull(next)?.let {
+            it.status = status
+            it.verified = r.data?.getStringExtra(BillActivity.RESULT_VERIFIED).orEmpty()
+        }
         if (single) {
             running = false
             single = false
@@ -146,6 +154,8 @@ class BatchActivity : AppCompatActivity() {
         super.onSaveInstanceState(outState)
         outState.putStringArrayList("digits", ArrayList(items.map { it.query.digits }))
         outState.putStringArrayList("status", ArrayList(items.map { it.status.orEmpty() }))
+        outState.putStringArrayList("verified", ArrayList(items.map { it.verified }))
+        outState.putSerializable("expect", HashMap(expectIds))
         outState.putInt("next", next)
         outState.putBoolean("running", running)
         outState.putBoolean("single", single)
@@ -155,9 +165,12 @@ class BatchActivity : AppCompatActivity() {
     private fun restore(state: Bundle) {
         val digits = state.getStringArrayList("digits").orEmpty()
         val status = state.getStringArrayList("status").orEmpty()
+        val verified = state.getStringArrayList("verified").orEmpty()
         items = ArrayList(digits.mapIndexedNotNull { i, d ->
-            RefNumber.parse(d)?.let { Item(it, status.getOrNull(i)?.ifBlank { null }) }
+            RefNumber.parse(d)?.let { Item(it, status.getOrNull(i)?.ifBlank { null }, verified.getOrNull(i).orEmpty()) }
         })
+        @Suppress("UNCHECKED_CAST", "DEPRECATION")
+        (state.getSerializable("expect") as? HashMap<String, String>)?.let { expectIds.putAll(it) }
         next = state.getInt("next")
         running = state.getBoolean("running")
         single = state.getBoolean("single")
@@ -211,42 +224,99 @@ class BatchActivity : AppCompatActivity() {
             .show()
     }
 
-    /** Reads the reference number from each photo, one after another. */
+    /** Reads the reference number from each photo (enlarged, sharpened, read several times). */
     private fun readPhotos(uris: List<Uri>) {
         busyOverlay.isVisible = true
-        val found = ArrayList<String>()
-        var unclear = 0
+        val results = ArrayList<PhotoNumber>()
 
         fun step(i: Int) {
             if (isFinishing || isDestroyed) return
             if (i >= uris.size) {
                 busyOverlay.isVisible = false
-                appendNumbers(found)
-                var msg = getString(R.string.batch_photos_done, found.size, uris.size)
-                if (unclear > 0) msg += "\n\n" + getString(R.string.batch_photos_unclear, unclear)
-                MaterialAlertDialogBuilder(this).setMessage(msg).setPositiveButton(R.string.ok, null).show()
+                reviewPhotos(results)
                 return
             }
             busyText.text = getString(R.string.batch_reading, i + 1, uris.size)
             scanner.scan(
                 uris[i],
-                onResult = { candidates ->
-                    val best = candidates.firstOrNull()
-                    if (best == null) {
-                        unclear++
-                    } else {
-                        if (!RefExtractor.isConfident(candidates)) unclear++
-                        found += best.digits
-                    }
+                onResult = { r ->
+                    results += PhotoNumber(r.best?.query, r.best, r.consumerId)
                     step(i + 1)
                 },
                 onError = {
-                    unclear++
+                    results += PhotoNumber(null, null, null)
                     step(i + 1)
                 },
             )
         }
         step(0)
+    }
+
+    /** Every photo's number next to the enlarged picture of it; red digits were hard to read. */
+    private fun reviewPhotos(results: List<PhotoNumber>) {
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val pad = (12 * resources.displayMetrics.density).toInt()
+        results.forEachIndexed { i, r ->
+            val verified = r.verified
+            if (verified == null) {
+                list.addView(TextView(this).apply {
+                    text = getString(R.string.photo_review_none, i + 1)
+                    setPadding(pad * 2, pad, pad * 2, pad)
+                    setTextColor(0xFFD32F2F.toInt())
+                })
+                return@forEachIndexed
+            }
+            val view = ScanViews.proofView(this, verified, r.consumerId, getString(R.string.photo_review_caption, i + 1))
+            val correct = MaterialButton(this, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
+                text = getString(R.string.correct_it)
+                isAllCaps = false
+                setOnClickListener { correctNumber(r, view) }
+            }
+            (view as LinearLayout).addView(correct)
+            list.addView(view)
+        }
+        val scroll = ScrollView(this).apply { addView(list) }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.photo_review_title)
+            .setView(scroll)
+            .setPositiveButton(R.string.photo_review_add) { _, _ ->
+                for (r in results) {
+                    val q = r.query ?: continue
+                    r.consumerId?.let { expectIds[q.digits] = it }
+                }
+                appendNumbers(results.mapNotNull { it.query?.digits })
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun correctNumber(r: PhotoNumber, view: View) {
+        val edit = android.widget.EditText(this).apply {
+            setText(r.query?.digits.orEmpty())
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            textSize = 22f
+            setSelection(text.length)
+        }
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val wrapper = android.widget.FrameLayout(this).apply {
+            setPadding(pad, pad / 2, pad, 0)
+            addView(edit)
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.correct_it)
+            .setView(wrapper)
+            .setPositiveButton(R.string.ok) { _, _ ->
+                val q = RefNumber.parse(edit.text.toString())
+                if (q == null) {
+                    toast(getString(R.string.ref_error))
+                } else {
+                    r.query = q
+                    ScanViews.bindCorrected(view, this, q)
+                }
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     // ---- Getting the bills -----------------------------------------------------------------
@@ -268,14 +338,19 @@ class BatchActivity : AppCompatActivity() {
             showResults()
             return
         }
-        billLauncher.launch(BillActivity.batchIntent(this, items[next].query, next, items.size))
+        launchBill(next)
     }
 
     private fun retry(index: Int) {
         next = index
         running = true
         single = true
-        billLauncher.launch(BillActivity.batchIntent(this, items[index].query, index, items.size))
+        launchBill(index)
+    }
+
+    private fun launchBill(index: Int) {
+        val q = items[index].query
+        billLauncher.launch(BillActivity.batchIntent(this, q, index, items.size, expectIds[q.digits]))
     }
 
     /** The picture of a bill that was downloaded (or taken from the saved copy) in this run. */
@@ -315,6 +390,10 @@ class BatchActivity : AppCompatActivity() {
                 BillActivity.STATUS_FAILED -> getString(R.string.batch_status_failed)
                 BillActivity.STATUS_SKIPPED -> getString(R.string.batch_status_skipped)
                 else -> getString(R.string.batch_status_stopped)
+            } + when (item.verified) {
+                BillActivity.VERIFIED_MATCH -> "\n" + getString(R.string.batch_verify_match)
+                BillActivity.VERIFIED_MISMATCH -> "\n" + getString(R.string.batch_verify_mismatch)
+                else -> ""
             }
             val image = row.findViewById<ImageView>(R.id.billImage)
             val saveButton = row.findViewById<View>(R.id.billSave)

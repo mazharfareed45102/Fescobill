@@ -73,6 +73,12 @@ PDFs come from the page's print output, the same as the site's **Print** button.
 The picture is made from that PDF.
 
 The reference number is read from photos with Google ML Kit text recognition, built into the app.
+Blurry photos are handled carefully: after finding the number, the app cuts out that line, enlarges it and
+reads it again as is, sharpened (contrast stretch + unsharp mask), strongly sharpened and in black and white.
+The readings vote digit by digit, weighted by the reader's confidence for each character (`ReadingVote`).
+The confirm screen shows the enlarged, sharpened picture next to the number, with any doubtful digit in red.
+The Consumer ID printed on the photo is read too: when the bill downloads, the app checks that the bill shows
+the same Consumer ID. A misread reference number would bring up another consumer's bill, so this catches it.
 Every 14-digit number on the bill is scored by the label printed next to it (`REFERENCE No.`,
 `OLD A/C NUMBER`, `CONSUMER ID`, …) and by the `U`/`R` letter after it. If more than one number is
 possible, the app lets you choose.
